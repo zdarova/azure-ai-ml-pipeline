@@ -6,9 +6,6 @@ on:
     - cron: '0 6 * * 1'
 
 env:
-  AZURE_ML_SUBSCRIPTION_ID: ${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}
-  AZURE_ML_RESOURCE_GROUP: ${{ secrets.AZURE_ML_RESOURCE_GROUP }}
-  AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
@@ -36,11 +33,19 @@ jobs:
           subscription-id: ${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}
 
       - name: Submit Azure ML Pipeline
+        env:
+          AZURE_AI_ENDPOINT: ${{ secrets.AZURE_AI_ENDPOINT }}
+          AZURE_AI_KEY: ${{ secrets.AZURE_AI_KEY }}
+          AZURE_AI_CHAT_DEPLOYMENT: claude-sonnet-4-6
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
+          AZURE_OPENAI_EMBEDDING_DEPLOYMENT: text-embedding-3-small
+          PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
         run: |
           python pipeline.py \
-            --subscription-id "$AZURE_ML_SUBSCRIPTION_ID" \
-            --resource-group "$AZURE_ML_RESOURCE_GROUP" \
-            --workspace "$AZURE_ML_WORKSPACE" \
+            --subscription-id "${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}" \
+            --resource-group "${{ secrets.AZURE_ML_RESOURCE_GROUP }}" \
+            --workspace "${{ secrets.AZURE_ML_WORKSPACE }}" \
             --compute cpu-cluster \
             --threshold 0.6 \
             --experiment-name ricoh-rag-evaluation

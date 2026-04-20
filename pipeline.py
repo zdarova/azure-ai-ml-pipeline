@@ -1,5 +1,6 @@
 """Azure ML Pipeline - RAG evaluation with quality gate."""
 
+import os
 import argparse
 from azure.identity import DefaultAzureCredential
 from azure.ai.ml import MLClient, command, Input, Output
@@ -11,7 +12,7 @@ def get_ml_client(subscription_id: str, resource_group: str, workspace: str) -> 
     return MLClient(DefaultAzureCredential(), subscription_id, resource_group, workspace)
 
 
-def build_pipeline(ml_client: MLClient, threshold: float, compute: str):
+def build_pipeline(ml_client: MLClient, threshold: float, compute: str, env_vars: dict):
     env = Environment(
         name="ricoh-rag-eval-env",
         image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
@@ -27,6 +28,7 @@ def build_pipeline(ml_client: MLClient, threshold: float, compute: str):
         environment=env,
         inputs={"threshold": Input(type="number", default=threshold)},
         outputs={"results": Output(type="uri_folder")},
+        environment_variables=env_vars,
     )
 
     gate_component = command(
@@ -52,15 +54,6 @@ def build_pipeline(ml_client: MLClient, threshold: float, compute: str):
     )
     def rag_eval_pipeline(threshold: float = 0.6):
         eval_step = eval_component(threshold=threshold)
-        eval_step.environment_variables = {
-            "AZURE_AI_ENDPOINT": "${{secrets.AZURE_AI_ENDPOINT}}",
-            "AZURE_AI_KEY": "${{secrets.AZURE_AI_KEY}}",
-            "AZURE_AI_CHAT_DEPLOYMENT": "${{secrets.AZURE_AI_CHAT_DEPLOYMENT}}",
-            "AZURE_OPENAI_ENDPOINT": "${{secrets.AZURE_OPENAI_ENDPOINT}}",
-            "AZURE_OPENAI_KEY": "${{secrets.AZURE_OPENAI_KEY}}",
-            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "${{secrets.AZURE_OPENAI_EMBEDDING_DEPLOYMENT}}",
-            "PG_CONNECTION_STRING": "${{secrets.PG_CONNECTION_STRING}}",
-        }
         gate_step = gate_component(results=eval_step.outputs.results)
         return {"results": eval_step.outputs.results}
 
@@ -77,8 +70,19 @@ def main():
     parser.add_argument("--experiment-name", default="ricoh-rag-evaluation")
     args = parser.parse_args()
 
+    # Pass secrets from runner environment into the pipeline job
+    env_vars = {
+        "AZURE_AI_ENDPOINT": os.environ["AZURE_AI_ENDPOINT"],
+        "AZURE_AI_KEY": os.environ["AZURE_AI_KEY"],
+        "AZURE_AI_CHAT_DEPLOYMENT": os.environ["AZURE_AI_CHAT_DEPLOYMENT"],
+        "AZURE_OPENAI_ENDPOINT": os.environ["AZURE_OPENAI_ENDPOINT"],
+        "AZURE_OPENAI_KEY": os.environ["AZURE_OPENAI_KEY"],
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"],
+        "PG_CONNECTION_STRING": os.environ["PG_CONNECTION_STRING"],
+    }
+
     ml_client = get_ml_client(args.subscription_id, args.resource_group, args.workspace)
-    pipeline_job = build_pipeline(ml_client, args.threshold, args.compute)
+    pipeline_job = build_pipeline(ml_client, args.threshold, args.compute, env_vars)
     pipeline_job.experiment_name = args.experiment_name
 
     submitted = ml_client.jobs.create_or_update(pipeline_job)
