@@ -5,3 +5,6 @@ langchain-postgres>=0.0.12
 psycopg[binary]>=3.1.0
 pgvector>=0.3.0
 mlflow>=2.15.0
+azureml-mlflow>=1.57.0
+azure-ai-ml>=1.20.0
+azure-identity>=1.17.0

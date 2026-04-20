@@ -1,14 +1,16 @@
-"""RAG Evaluation Pipeline - measures retrieval and generation quality."""
+"""RAG Evaluation - Azure ML pipeline component."""
 
 import os
 import json
+import argparse
 import mlflow
-from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
+from langchain_openai import AzureOpenAIEmbeddings
 from langchain_anthropic import ChatAnthropic
 from langchain_postgres.vectorstores import PGVector
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
-# Evaluation dataset: question + expected answer keywords
 EVAL_DATASET = [
     {
         "question": "Dove ha sede Ricoh Italia?",
@@ -44,7 +46,6 @@ def pg_conn_to_sqlalchemy(pg_str: str) -> str:
 
 
 def evaluate_retrieval(vectorstore, dataset):
-    """Measure retrieval accuracy: are the right documents returned?"""
     hits = 0
     for item in dataset:
         docs = vectorstore.similarity_search(item["question"], k=4)
@@ -55,7 +56,6 @@ def evaluate_retrieval(vectorstore, dataset):
 
 
 def evaluate_answer_quality(chain, dataset):
-    """Measure answer quality: does the response contain expected keywords?"""
     scores = []
     for item in dataset:
         response = chain.invoke(item["question"]).lower()
@@ -65,7 +65,6 @@ def evaluate_answer_quality(chain, dataset):
 
 
 def evaluate_answer_relevance(llm, dataset, chain):
-    """Use LLM-as-judge to score answer relevance (0-1)."""
     judge_prompt = ChatPromptTemplate.from_template(
         "Rate the relevance of this answer to the question on a scale 0-10.\n"
         "Question: {question}\nAnswer: {answer}\n"
@@ -83,21 +82,29 @@ def evaluate_answer_relevance(llm, dataset, chain):
     return sum(scores) / len(scores)
 
 
-def run_evaluation():
-    """Run full evaluation pipeline and log to MLflow."""
+def build_chain(vectorstore, llm):
+    prompt = ChatPromptTemplate.from_template(
+        "Contesto: {context}\n\nDomanda: {question}\nRispondi in italiano."
+    )
+
+    def format_docs(docs):
+        return "\n\n".join(d.page_content for d in docs)
+
+    return (
+        {"context": vectorstore.as_retriever(search_kwargs={"k": 4}) | format_docs, "question": RunnablePassthrough()}
+        | prompt | llm | StrOutputParser()
+    )
+
+
+def run_evaluation(threshold: float, output_dir: str):
     embeddings = AzureOpenAIEmbeddings(
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_key=os.environ["AZURE_OPENAI_KEY"],
         azure_deployment=os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"],
         api_version="2024-06-01",
     )
-
     conn_str = pg_conn_to_sqlalchemy(os.environ["PG_CONNECTION_STRING"])
-    vectorstore = PGVector(
-        connection=conn_str,
-        embeddings=embeddings,
-        collection_name="ricoh_knowledge",
-    )
+    vectorstore = PGVector(connection=conn_str, embeddings=embeddings, collection_name="ricoh_knowledge")
 
     llm = ChatAnthropic(
         model=os.environ["AZURE_AI_CHAT_DEPLOYMENT"],
@@ -106,50 +113,49 @@ def run_evaluation():
         temperature=0.3,
         max_tokens=1024,
     )
+    chain = build_chain(vectorstore, llm)
 
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.runnables import RunnablePassthrough
+    retrieval_accuracy = evaluate_retrieval(vectorstore, EVAL_DATASET)
+    answer_quality = evaluate_answer_quality(chain, EVAL_DATASET)
+    answer_relevance = evaluate_answer_relevance(llm, EVAL_DATASET, chain)
 
-    prompt = ChatPromptTemplate.from_template(
-        "Contesto: {context}\n\nDomanda: {question}\nRispondi in italiano."
-    )
+    passed = retrieval_accuracy >= threshold and answer_quality >= threshold
 
-    def format_docs(docs):
-        return "\n\n".join(d.page_content for d in docs)
+    # Log to Azure ML workspace MLflow
+    mlflow.log_metric("retrieval_accuracy", retrieval_accuracy)
+    mlflow.log_metric("answer_keyword_coverage", answer_quality)
+    mlflow.log_metric("answer_relevance_llm_judge", answer_relevance)
+    mlflow.log_metric("quality_gate_passed", int(passed))
+    mlflow.log_param("model", os.environ["AZURE_AI_CHAT_DEPLOYMENT"])
+    mlflow.log_param("embedding", os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"])
+    mlflow.log_param("retriever_k", 4)
+    mlflow.log_param("eval_dataset_size", len(EVAL_DATASET))
+    mlflow.log_param("threshold", threshold)
 
-    chain = (
-        {"context": vectorstore.as_retriever(search_kwargs={"k": 4}) | format_docs, "question": RunnablePassthrough()}
-        | prompt | llm | StrOutputParser()
-    )
+    # Write results to output dir for downstream steps
+    os.makedirs(output_dir, exist_ok=True)
+    results = {
+        "retrieval_accuracy": retrieval_accuracy,
+        "answer_keyword_coverage": answer_quality,
+        "answer_relevance_llm_judge": answer_relevance,
+        "quality_gate_passed": passed,
+    }
+    with open(os.path.join(output_dir, "results.json"), "w") as f:
+        json.dump(results, f, indent=2)
 
-    # Run evaluations
-    mlflow.set_experiment("ricoh-rag-evaluation")
-    with mlflow.start_run(run_name="rag-eval"):
-        retrieval_accuracy = evaluate_retrieval(vectorstore, EVAL_DATASET)
-        answer_quality = evaluate_answer_quality(chain, EVAL_DATASET)
-        answer_relevance = evaluate_answer_relevance(llm, EVAL_DATASET, chain)
+    print(f"Retrieval Accuracy:      {retrieval_accuracy:.2%}")
+    print(f"Answer Keyword Coverage: {answer_quality:.2%}")
+    print(f"Answer Relevance (LLM):  {answer_relevance:.2%}")
+    print(f"\nQuality Gate ({'✓ PASSED' if passed else '✗ FAILED'}) - threshold: {threshold:.0%}")
 
-        mlflow.log_metric("retrieval_accuracy", retrieval_accuracy)
-        mlflow.log_metric("answer_keyword_coverage", answer_quality)
-        mlflow.log_metric("answer_relevance_llm_judge", answer_relevance)
-        mlflow.log_param("model", os.environ["AZURE_AI_CHAT_DEPLOYMENT"])
-        mlflow.log_param("embedding", os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"])
-        mlflow.log_param("retriever_k", 4)
-        mlflow.log_param("eval_dataset_size", len(EVAL_DATASET))
-
-        print(f"Retrieval Accuracy:     {retrieval_accuracy:.2%}")
-        print(f"Answer Keyword Coverage: {answer_quality:.2%}")
-        print(f"Answer Relevance (LLM): {answer_relevance:.2%}")
-
-        # Quality gate
-        THRESHOLD = 0.6
-        passed = retrieval_accuracy >= THRESHOLD and answer_quality >= THRESHOLD
-        mlflow.log_metric("quality_gate_passed", int(passed))
-        print(f"\nQuality Gate ({'✓ PASSED' if passed else '✗ FAILED'}) - threshold: {THRESHOLD:.0%}")
-
-        return passed
+    return passed
 
 
 if __name__ == "__main__":
-    passed = run_evaluation()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument("--output_dir", type=str, default="./outputs")
+    args = parser.parse_args()
+
+    passed = run_evaluation(args.threshold, args.output_dir)
     exit(0 if passed else 1)

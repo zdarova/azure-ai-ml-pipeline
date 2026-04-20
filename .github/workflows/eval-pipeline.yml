@@ -1,47 +1,39 @@
 name: RAG Evaluation Pipeline
 
 on:
-  # Triggered by data repo or agent repo changes
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * 1'  # Weekly Monday 6am
+    - cron: '0 6 * * 1'
 
 env:
-  AZURE_AI_ENDPOINT: ${{ secrets.AZURE_AI_ENDPOINT }}
-  AZURE_AI_KEY: ${{ secrets.AZURE_AI_KEY }}
-  AZURE_AI_CHAT_DEPLOYMENT: claude-sonnet-4-6
-  AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
-  AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
-  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: text-embedding-3-small
-  PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
+  AZURE_ML_SUBSCRIPTION_ID: ${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}
+  AZURE_ML_RESOURCE_GROUP: ${{ secrets.AZURE_ML_RESOURCE_GROUP }}
+  AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
 
 jobs:
-  evaluate:
+  submit-pipeline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run RAG evaluation
-        run: python eval/rag_evaluation.py
-      - name: Upload MLflow artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mlflow-metrics
-          path: mlruns/
 
-  gate:
-    needs: evaluate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Quality gate check
+      - name: Install dependencies
+        run: pip install azure-ai-ml azure-identity
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Submit Azure ML Pipeline
         run: |
-          if [ "${{ needs.evaluate.result }}" = "failure" ]; then
-            echo "❌ Quality gate FAILED - blocking deployment"
-            exit 1
-          fi
-          echo "✅ Quality gate PASSED"
+          python pipeline.py \
+            --subscription-id "$AZURE_ML_SUBSCRIPTION_ID" \
+            --resource-group "$AZURE_ML_RESOURCE_GROUP" \
+            --workspace "$AZURE_ML_WORKSPACE" \
+            --compute cpu-cluster \
+            --threshold 0.6 \
+            --experiment-name ricoh-rag-evaluation
