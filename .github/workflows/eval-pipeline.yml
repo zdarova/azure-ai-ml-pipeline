@@ -9,6 +9,11 @@ env:
   AZURE_ML_SUBSCRIPTION_ID: ${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}
   AZURE_ML_RESOURCE_GROUP: ${{ secrets.AZURE_ML_RESOURCE_GROUP }}
   AZURE_ML_WORKSPACE: ${{ secrets.AZURE_ML_WORKSPACE }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   submit-pipeline:
@@ -26,7 +31,9 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_ML_SUBSCRIPTION_ID }}
 
       - name: Submit Azure ML Pipeline
         run: |
